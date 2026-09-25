@@ -10,3 +10,4 @@ tls*/
 *.env
 *.log
 temp/
+build/

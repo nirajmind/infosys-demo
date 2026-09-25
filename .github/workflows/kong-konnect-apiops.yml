@@ -1,0 +1,223 @@
+name: Kong Konnect APIOps Pipeline
+
+# ==============================================================================
+# 5-Stage APIOps Pipeline for Kong Konnect
+# 1. Validate: Verifies OpenAPI Spec syntax and decK schema validity
+# 2. Lint: Validates API design quality and governance rules using Spectral
+# 3. Build: Converts OAS specs to Kong declarative configuration + tags & patches
+# 4. Diff: Compares target Control Plane state with the desired build configuration
+# 5. Sync: Applies the declarative configuration to the Konnect Control Plane
+# ==============================================================================
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "flight-data/**"
+      - "sales/**"
+      - "experience/**"
+      - "platform/**"
+      - ".github/workflows/kong-konnect-apiops.yml"
+      - ".spectral.yaml"
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      target_env:
+        description: "Target Environment to deploy to"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - uat
+          - prod
+      select_tag:
+        description: "decK Select Tag for resource isolation"
+        required: false
+        default: "infosys-poc-managed"
+        type: string
+
+env:
+  # Konnect parameters with fallbacks (can be configured in GitHub Secrets / Variables)
+  KONNECT_ADDR: ${{ vars.KONNECT_ADDR || 'https://us.api.konghq.com' }}
+  KONNECT_CONTROL_PLANE_NAME: ${{ vars.KONNECT_CONTROL_PLANE_NAME || 'infosys-poc-cp' }}
+  SELECT_TAG: ${{ inputs.select_tag || vars.SELECT_TAG || 'infosys-poc-managed' }}
+  DECK_VERSION: "1.64.0"
+
+jobs:
+  # ============================================================================
+  # STAGE 1: VALIDATE (Offline - No secrets needed)
+  # ============================================================================
+  stage-1-validate:
+    name: "Stage 1: Validate Specs"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup decK CLI
+        uses: kong/setup-deck@v1
+        with:
+          deck-version: ${{ env.DECK_VERSION }}
+
+      - name: Validate OpenAPI Specs via decK
+        run: |
+          echo "==> Validating OpenAPI Specifications using decK openapi2kong..."
+          for spec in flight-data/flights/openapi.yaml flight-data/routes/openapi.yaml sales/bookings/openapi.yaml sales/customer/openapi.yaml; do
+            if [ -f "$spec" ]; then
+              echo "Validating: $spec"
+              deck file openapi2kong -s "$spec" | deck file validate -
+            fi
+          done
+          echo "✓ All OpenAPI Specifications validated successfully."
+
+  # ============================================================================
+  # STAGE 2: LINT (Offline - API Quality & Governance)
+  # ============================================================================
+  stage-2-lint:
+    name: "Stage 2: Lint API Specs (Spectral)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run Spectral OAS Linter
+        run: |
+          echo "==> Running Spectral API Style & Quality Linting..."
+          npx --yes @stoplight/spectral-cli lint "flight-data/**/openapi.yaml" "sales/**/openapi.yaml" --ruleset .spectral.yaml
+          echo "✓ API Linting completed."
+
+  # ============================================================================
+  # STAGE 3: BUILD (Generate & Assemble Kong Declarative Configuration)
+  # ============================================================================
+  stage-3-build:
+    name: "Stage 3: Build Declarative Configuration"
+    needs: [stage-1-validate, stage-2-lint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup decK CLI
+        uses: kong/setup-deck@v1
+        with:
+          deck-version: ${{ env.DECK_VERSION }}
+
+      - name: Assemble Kong Declarative Config
+        run: |
+          mkdir -p build/artifacts
+
+          echo "==> Converting domain OAS to Kong YAML and tagging..."
+          deck file openapi2kong -s flight-data/flights/openapi.yaml | \
+            deck file patch flight-data/flights/kong/patches.yaml | \
+            deck file add-tags -o build/artifacts/flights-kong.yaml --selector "$.services[*]" --selector "$.services[*].routes[*]" flight-data
+
+          deck file openapi2kong -s flight-data/routes/openapi.yaml | \
+            deck file patch flight-data/routes/kong/patches.yaml | \
+            deck file add-tags -o build/artifacts/routes-kong.yaml --selector "$.services[*]" --selector "$.services[*].routes[*]" flight-data
+
+          deck file openapi2kong -s sales/bookings/openapi.yaml | \
+            deck file patch sales/bookings/kong/patches.yaml | \
+            deck file add-tags -o build/artifacts/bookings-kong.yaml --selector "$.services[*]" --selector "$.services[*].routes[*]" sales
+
+          deck file openapi2kong -s sales/customer/openapi.yaml | \
+            deck file patch sales/customer/kong/patches.yaml | \
+            deck file add-tags -o build/artifacts/customer-kong.yaml --selector "$.services[*]" --selector "$.services[*].routes[*]" sales
+
+          echo "==> Merging services with Experience and Platform configurations..."
+          deck file merge \
+            build/artifacts/flights-kong.yaml \
+            build/artifacts/routes-kong.yaml \
+            build/artifacts/bookings-kong.yaml \
+            build/artifacts/customer-kong.yaml \
+            experience/kong/experience-service.yaml \
+            platform/kong/platform-kong-base.yaml \
+            platform/kong/consumers/consumers.yaml \
+            platform/kong/consumers/groups.yaml \
+            platform/kong/plugins/acme.yaml \
+            platform/kong/plugins/rate-limiting-advanced.yaml \
+            platform/kong/vaults/aws-secrets-manager.yaml | \
+          deck file patch platform/kong/patches.yaml | \
+          deck file add-tags -o build/kong-render.yaml "${{ env.SELECT_TAG }}"
+
+          echo "==> Final schema validation of assembled configuration..."
+          deck file validate build/kong-render.yaml
+          echo "✓ Successfully built and validated build/kong-render.yaml"
+
+      - name: Upload Assembled Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kong-render-config
+          path: build/kong-render.yaml
+          retention-days: 7
+
+  # ============================================================================
+  # STAGE 4: DIFF (Compare against live Konnect Control Plane)
+  # ============================================================================
+  stage-4-diff:
+    name: "Stage 4: Diff against Konnect"
+    needs: [stage-3-build]
+    runs-on: ubuntu-latest
+    env:
+      DECK_KONNECT_TOKEN: ${{ secrets.KONNECT_TOKEN }}
+      DECK_KONNECT_ADDR: ${{ env.KONNECT_ADDR }}
+      DECK_KONNECT_CONTROL_PLANE_NAME: ${{ env.KONNECT_CONTROL_PLANE_NAME }}
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup decK CLI
+        uses: kong/setup-deck@v1
+        with:
+          deck-version: ${{ env.DECK_VERSION }}
+
+      - name: Download Build Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kong-render-config
+          path: build
+
+      - name: decK Diff Check
+        run: |
+          echo "==> Checking diff against Konnect Control Plane: ${{ env.KONNECT_CONTROL_PLANE_NAME }} (${{ env.KONNECT_ADDR }})"
+          deck gateway diff build/kong-render.yaml --select-tag "${{ env.SELECT_TAG }}"
+
+  # ============================================================================
+  # STAGE 5: SYNC (Apply declarative changes to Konnect Control Plane)
+  # ============================================================================
+  stage-5-sync:
+    name: "Stage 5: Sync to Konnect"
+    needs: [stage-4-diff]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      DECK_KONNECT_TOKEN: ${{ secrets.KONNECT_TOKEN }}
+      DECK_KONNECT_ADDR: ${{ env.KONNECT_ADDR }}
+      DECK_KONNECT_CONTROL_PLANE_NAME: ${{ env.KONNECT_CONTROL_PLANE_NAME }}
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup decK CLI
+        uses: kong/setup-deck@v1
+        with:
+          deck-version: ${{ env.DECK_VERSION }}
+
+      - name: Download Build Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kong-render-config
+          path: build
+
+      - name: Apply Configuration to Konnect (decK sync)
+        run: |
+          echo "==> Applying configuration to Control Plane: ${{ env.KONNECT_CONTROL_PLANE_NAME }} (${{ env.KONNECT_ADDR }})"
+          deck gateway sync build/kong-render.yaml --select-tag "${{ env.SELECT_TAG }}"
+          echo "✓ Configuration successfully synchronized with Konnect."
