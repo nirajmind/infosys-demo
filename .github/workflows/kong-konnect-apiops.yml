@@ -166,8 +166,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DECK_KONNECT_TOKEN: ${{ secrets.KONNECT_TOKEN }}
-      DECK_KONNECT_ADDR: ${{ env.KONNECT_ADDR }}
-      DECK_KONNECT_CONTROL_PLANE_NAME: ${{ env.KONNECT_CONTROL_PLANE_NAME }}
+      DECK_KONNECT_ADDR: ${{ vars.KONNECT_ADDR || 'https://us.api.konghq.com' }}
+      DECK_KONNECT_CONTROL_PLANE_NAME: ${{ vars.KONNECT_CONTROL_PLANE_NAME || 'infosys-poc-cp' }}
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
@@ -199,8 +199,8 @@ jobs:
     environment: dev
     env:
       DECK_KONNECT_TOKEN: ${{ secrets.KONNECT_TOKEN }}
-      DECK_KONNECT_ADDR: ${{ env.KONNECT_ADDR }}
-      DECK_KONNECT_CONTROL_PLANE_NAME: ${{ env.KONNECT_CONTROL_PLANE_NAME }}
+      DECK_KONNECT_ADDR: ${{ vars.KONNECT_ADDR || 'https://us.api.konghq.com' }}
+      DECK_KONNECT_CONTROL_PLANE_NAME: ${{ vars.KONNECT_CONTROL_PLANE_NAME || 'infosys-poc-cp' }}
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
