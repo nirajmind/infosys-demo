@@ -1,0 +1,82 @@
+_format_version: "3.0"
+
+# Centralized platform plugins: Managed by Kong Admins / Enterprise Security
+plugins:
+  # 1. Global ACL: Restricts access to authorized corporate consumers
+  - name: acl
+    enabled: true
+    config:
+      allow:
+        - feacf2e9-234e-4eef-85fe-534b0551bdd3
+        - 08fb9d74-c1f9-4bad-8937-8522dc3c5a6f
+        - b1874627-e39d-4976-b370-a0ee7e383a24
+        - 4be0b1b7-29d2-41f0-84e8-738f06277c8b
+        - isonpremkongtest
+      always_use_authenticated_groups: false
+      hide_groups_header: false
+      include_consumer_groups: false
+    tags:
+      - platform-security
+      - global-acl
+
+  # 2. Global Azure Active Directory (Entra ID) OIDC Plugin
+  # Defined once at the platform level instead of 1,794 times on routes!
+  - name: openid-connect
+    enabled: true
+    config:
+      issuer: https://login.microsoftonline.com/63ce7d59-2f3e-42cd-a8cc-be764cff5eb6/.well-known/openid-configuration
+      https_proxy: http://blrproxy.ad.infosys.com:443
+      auth_methods:
+        - bearer
+      authenticated_groups_claim:
+        - appid
+      anonymous: itgatewaytst
+      cache_tokens: true
+      cache_tokens_salt: "infy-konnect-oidc-salt-2026-secure"
+      cache_ttl: 3600
+      cache_user_info: true
+      upstream_headers_claims:
+        - upn
+        - appid
+      upstream_headers_names:
+        - user
+        - client
+      verify_claims: true
+      verify_signature: true
+    tags:
+      - platform-security
+      - global-oidc
+
+  # 3. Enterprise Elasticsearch Access Logging
+  - name: http-log
+    enabled: true
+    config:
+      http_endpoint: http://kongusertst:KongUserTst_32!@10.68.191.97:9200/akskong-infyme-access-on-prem-els/_doc/
+      method: POST
+      content_type: application/json
+      timeout: 10000
+      keepalive: 60000
+      ssl_verify: false
+      custom_fields_by_lua:
+        upstream_time: return ngx.var.upstream_response_time
+      queue:
+        concurrency_limit: 1
+        max_batch_size: 10
+        max_entries: 10000
+        max_coalescing_delay: 1
+    tags:
+      - platform-observability
+      - els-logging
+
+  # 4. Prometheus Monitoring Metrics
+  - name: prometheus
+    enabled: true
+    config:
+      per_consumer: true
+      status_code_metrics: true
+      latency_metrics: true
+      bandwidth_metrics: true
+      upstream_health_metrics: true
+    tags:
+      - platform-observability
+      - prometheus

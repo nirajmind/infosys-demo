@@ -1,0 +1,33 @@
+_format_version: "3.0"
+
+consumer_groups:
+  - name: oidc-group
+    tags:
+      - platform-security
+
+consumers:
+  - username: feacf2e9-234e-4eef-85fe-534b0551bdd3
+    custom_id: feacf2e9-234e-4eef-85fe-534b0551bdd3
+    groups:
+      - name: oidc-group
+    tags:
+      - platform-security
+
+  - username: infyclient
+    custom_id: infyclient
+    groups:
+      - name: oidc-group
+    tags:
+      - platform-security
+
+  - username: isonpremkongtest
+    groups:
+      - name: oidc-group
+    acls:
+      - group: isonpremkongtest
+    tags:
+      - platform-security
+
+  - username: itgatewaytst
+    tags:
+      - platform-security

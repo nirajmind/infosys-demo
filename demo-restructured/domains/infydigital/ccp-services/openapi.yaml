@@ -1,0 +1,53 @@
+openapi: 3.0.3
+info:
+  title: Infosys Digital CCP Services API
+  description: Core Digital Experience & Integration Service for Infosys Digital internal and partner channels.
+  version: 1.0.0
+  contact:
+    name: Infosys Digital Architecture Team
+    email: infydigital-team@infosys.com
+
+servers:
+  - url: https://itgatewaytst.infosysapps.com
+    description: Test Gateway (External)
+  - url: https://isgatewaytst.ad.infosys.com
+    description: Test Gateway (Internal AD)
+
+paths:
+  /infydigital/CCPServices:
+    get:
+      summary: Retrieve CCP Digital Services status and catalogue
+      operationId: getCCPServices
+      tags:
+        - infydigital
+      responses:
+        '200':
+          description: Successful response returning service catalogue
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service_name:
+                    type: string
+                    example: "CCPServices"
+                  status:
+                    type: string
+                    example: "ACTIVE"
+                  domain:
+                    type: string
+                    example: "infydigital"
+        '401':
+          description: Unauthorized - Bearer token missing or invalid
+        '403':
+          description: Forbidden - Consumer not in allowed ACL group
+
+  /infydigital/CCPServices/health:
+    get:
+      summary: Service healthcheck endpoint
+      operationId: getCCPHealth
+      tags:
+        - infydigital
+      responses:
+        '200':
+          description: Service is healthy

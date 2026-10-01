@@ -1,0 +1,25 @@
+_format_version: "1.0"
+
+# Domain-specific routing patches for infydigital CCPServices
+patches:
+  - selectors:
+      - $.services[?(@.name=="infydigital-ccp-services")]
+    values:
+      host: 10.82.5.132
+      port: 9042
+      protocol: http
+      connect_timeout: 60000
+      read_timeout: 60000
+      retries: 0
+
+  - selectors:
+      - $.services[*].routes[*]
+    values:
+      hosts:
+        - itgatewaytst.infosysapps.com
+        - isgatewaytst.ad.infosys.com
+      https_redirect_status_code: 426
+      path_handling: v0
+      strip_path: false
+      protocols:
+        - https
