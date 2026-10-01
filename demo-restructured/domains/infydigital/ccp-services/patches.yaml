@@ -2,9 +2,11 @@ _format_version: "1.0"
 
 # Domain-specific routing patches for infydigital CCPServices
 patches:
+  # Selector 1: Find the service named "infydigital-ccp-services"
   - selectors:
       - $.services[?(@.name=="infydigital-ccp-services")]
     values:
+      # Inject the real infrastructure backend from Infosys datacenter:
       host: 10.82.5.132
       port: 9042
       protocol: http
@@ -12,9 +14,11 @@ patches:
       read_timeout: 60000
       retries: 0
 
+  # Selector 2: Target all routes created for this service
   - selectors:
       - $.services[*].routes[*]
     values:
+      # Inject the gateway routing hostnames and SSL rules:
       hosts:
         - itgatewaytst.infosysapps.com
         - isgatewaytst.ad.infosys.com

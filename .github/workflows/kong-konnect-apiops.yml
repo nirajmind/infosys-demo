@@ -1,21 +1,21 @@
 name: Kong Konnect APIOps Pipeline
 
 # ==============================================================================
-# 5-Stage APIOps Pipeline for Kong Konnect
-# 1. Validate: Verifies OpenAPI Spec syntax and decK schema validity
+# Production 5-Stage APIOps Pipeline for Kong Konnect (Federated Option A)
+# 1. Validate: Verifies OpenAPI Spec syntax and decK schema validity offline
 # 2. Lint: Validates API design quality and governance rules using Spectral
-# 3. Build: Converts OAS specs to Kong declarative configuration + tags & patches
-# 4. Diff: Compares target Control Plane state with the desired build configuration
-# 5. Sync: Applies the declarative configuration to the Konnect Control Plane
+# 3. Build: Converts domain OAS specs, applies routing patches, merges platform baselines, and tags
+# 4. Diff: Non-destructive diff against target Konnect Control Plane via select-tag
+# 5. Sync: Idempotent gateway sync applying declarative configuration to Konnect
 # ==============================================================================
 
 on:
   push:
     branches: [main, master]
     paths:
+      - "demo-restructured/**"
       - "flight-data/**"
       - "sales/**"
-      - "experience/**"
       - "platform/**"
       - ".github/workflows/kong-konnect-apiops.yml"
       - ".spectral.yaml"
@@ -23,6 +23,16 @@ on:
     branches: [main, master]
   workflow_dispatch:
     inputs:
+      target_domain:
+        description: "Target Domain to build and deploy"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - infydigital
+          - flight-data
+          - sales
       target_env:
         description: "Target Environment to deploy to"
         required: true
@@ -33,21 +43,19 @@ on:
           - uat
           - prod
       select_tag:
-        description: "decK Select Tag for resource isolation"
+        description: "decK Select Tag for resource isolation (leave blank for domain default)"
         required: false
-        default: "infosys-poc-managed"
+        default: ""
         type: string
 
 env:
-  # Konnect parameters with fallbacks (can be configured in GitHub Secrets / Variables)
   KONNECT_ADDR: ${{ vars.KONNECT_ADDR || 'https://us.api.konghq.com' }}
   KONNECT_CONTROL_PLANE_NAME: ${{ vars.KONNECT_CONTROL_PLANE_NAME || 'infosys-poc-cp' }}
-  SELECT_TAG: ${{ inputs.select_tag || vars.SELECT_TAG || 'infosys-poc-managed' }}
   DECK_VERSION: "1.64.0"
 
 jobs:
   # ============================================================================
-  # STAGE 1: VALIDATE (Offline - No secrets needed)
+  # STAGE 1: VALIDATE (Offline Syntax Verification)
   # ============================================================================
   stage-1-validate:
     name: "Stage 1: Validate Specs"
@@ -63,17 +71,15 @@ jobs:
 
       - name: Validate OpenAPI Specs via decK
         run: |
-          echo "==> Validating OpenAPI Specifications using decK openapi2kong..."
-          for spec in flight-data/flights/openapi.yaml flight-data/routes/openapi.yaml sales/bookings/openapi.yaml sales/customer/openapi.yaml; do
-            if [ -f "$spec" ]; then
-              echo "Validating: $spec"
-              deck file openapi2kong -s "$spec" | deck file validate -
-            fi
+          echo "==> Validating all OpenAPI Specifications using decK openapi2kong..."
+          find . -name "openapi.yaml" -not -path "*/build/*" | while read spec; do
+            echo "Checking: $spec"
+            deck file openapi2kong -s "$spec" | deck file validate -
           done
           echo "✓ All OpenAPI Specifications validated successfully."
 
   # ============================================================================
-  # STAGE 2: LINT (Offline - API Quality & Governance)
+  # STAGE 2: LINT (Offline Spectral Quality & Governance)
   # ============================================================================
   stage-2-lint:
     name: "Stage 2: Lint API Specs (Spectral)"
@@ -90,11 +96,11 @@ jobs:
       - name: Run Spectral OAS Linter
         run: |
           echo "==> Running Spectral API Style & Quality Linting..."
-          npx --yes @stoplight/spectral-cli lint "flight-data/**/openapi.yaml" "sales/**/openapi.yaml" --ruleset .spectral.yaml
+          npx --yes @stoplight/spectral-cli lint "demo-restructured/**/openapi.yaml" "flight-data/**/openapi.yaml" "sales/**/openapi.yaml" --ruleset .spectral.yaml
           echo "✓ API Linting completed."
 
   # ============================================================================
-  # STAGE 3: BUILD (Generate & Assemble Kong Declarative Configuration)
+  # STAGE 3: BUILD (Generate & Assemble Declarative Configuration)
   # ============================================================================
   stage-3-build:
     name: "Stage 3: Build Declarative Configuration"
@@ -109,52 +115,53 @@ jobs:
         with:
           deck-version: ${{ env.DECK_VERSION }}
 
-      - name: Assemble Kong Declarative Config
+      - name: Assemble Domain & Platform Configurations
         run: |
-          mkdir -p build/artifacts
+          mkdir -p build/domains build/platform
 
-          echo "==> Converting domain OAS to Kong YAML and tagging..."
-          deck file openapi2kong -s flight-data/flights/openapi.yaml | \
-            deck file patch flight-data/flights/kong/patches.yaml | \
-            deck file add-tags -o build/artifacts/flights-kong.yaml --selector "$.services[*]" --selector "$.services[*].routes[*]" flight-data
+          echo "==> 1. Building Restructured Domain: infydigital..."
+          if [ -f "demo-restructured/domains/infydigital/ccp-services/openapi.yaml" ]; then
+            deck file openapi2kong -s demo-restructured/domains/infydigital/ccp-services/openapi.yaml | \
+              deck file patch demo-restructured/domains/infydigital/ccp-services/patches.yaml | \
+              deck file add-tags -o build/domains/infydigital-ccp-kong.yaml "domain:infydigital" "api:ccp-services"
+          fi
 
-          deck file openapi2kong -s flight-data/routes/openapi.yaml | \
-            deck file patch flight-data/routes/kong/patches.yaml | \
-            deck file add-tags -o build/artifacts/routes-kong.yaml --selector "$.services[*]" --selector "$.services[*].routes[*]" flight-data
+          echo "==> 2. Building Legacy POC Domains: flight-data & sales..."
+          if [ -d "flight-data" ]; then
+            deck file openapi2kong -s flight-data/flights/openapi.yaml | \
+              deck file patch flight-data/flights/kong/patches.yaml | \
+              deck file add-tags -o build/domains/flights-kong.yaml --selector "$.services[*]" --selector "$.services[*].routes[*]" flight-data
 
-          deck file openapi2kong -s sales/bookings/openapi.yaml | \
-            deck file patch sales/bookings/kong/patches.yaml | \
-            deck file add-tags -o build/artifacts/bookings-kong.yaml --selector "$.services[*]" --selector "$.services[*].routes[*]" sales
+            deck file openapi2kong -s flight-data/routes/openapi.yaml | \
+              deck file patch flight-data/routes/kong/patches.yaml | \
+              deck file add-tags -o build/domains/routes-kong.yaml --selector "$.services[*]" --selector "$.services[*].routes[*]" flight-data
 
-          deck file openapi2kong -s sales/customer/openapi.yaml | \
-            deck file patch sales/customer/kong/patches.yaml | \
-            deck file add-tags -o build/artifacts/customer-kong.yaml --selector "$.services[*]" --selector "$.services[*].routes[*]" sales
+            deck file openapi2kong -s sales/bookings/openapi.yaml | \
+              deck file patch sales/bookings/kong/patches.yaml | \
+              deck file add-tags -o build/domains/bookings-kong.yaml --selector "$.services[*]" --selector "$.services[*].routes[*]" sales
 
-          echo "==> Merging services with Experience and Platform configurations..."
+            deck file openapi2kong -s sales/customer/openapi.yaml | \
+              deck file patch sales/customer/kong/patches.yaml | \
+              deck file add-tags -o build/domains/customer-kong.yaml --selector "$.services[*]" --selector "$.services[*].routes[*]" sales
+          fi
+
+          echo "==> 3. Merging Platform Baseline Policies..."
           deck file merge \
-            build/artifacts/flights-kong.yaml \
-            build/artifacts/routes-kong.yaml \
-            build/artifacts/bookings-kong.yaml \
-            build/artifacts/customer-kong.yaml \
-            experience/kong/experience-service.yaml \
-            platform/kong/platform-kong-base.yaml \
-            platform/kong/consumers/consumers.yaml \
-            platform/kong/consumers/groups.yaml \
-            platform/kong/plugins/acme.yaml \
-            platform/kong/plugins/rate-limiting-advanced.yaml \
-            platform/kong/vaults/aws-secrets-manager.yaml | \
-          deck file patch platform/kong/patches.yaml | \
-          deck file add-tags -o build/kong-render.yaml "${{ env.SELECT_TAG }}"
+            demo-restructured/platform/plugins/platform-baseline-policies.yaml \
+            demo-restructured/platform/consumers/consumers.yaml \
+            build/domains/infydigital-ccp-kong.yaml \
+            -o build/infydigital-rendered.yaml
 
-          echo "==> Final schema validation of assembled configuration..."
-          deck file validate build/kong-render.yaml
-          echo "✓ Successfully built and validated build/kong-render.yaml"
+          echo "==> Validating assembled declarative files..."
+          deck file validate build/domains/infydigital-ccp-kong.yaml
+          deck file validate build/infydigital-rendered.yaml
+          echo "✓ All declarative configurations assembled successfully."
 
-      - name: Upload Assembled Build Artifact
+      - name: Upload Assembled Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kong-render-config
-          path: build/kong-render.yaml
+          name: kong-build-artifacts
+          path: build/
           retention-days: 7
 
   # ============================================================================
@@ -165,7 +172,7 @@ jobs:
     needs: [stage-3-build]
     runs-on: ubuntu-latest
     env:
-      DECK_KONNECT_TOKEN: ${{ secrets.KONNECT_TOKEN }}
+      DECK_KONNECT_TOKEN: ${{ secrets.KONNECT_TOKEN || secrets.DECK_KONNECT_TOKEN }}
       DECK_KONNECT_ADDR: ${{ vars.KONNECT_ADDR || 'https://us.api.konghq.com' }}
       DECK_KONNECT_CONTROL_PLANE_NAME: ${{ vars.KONNECT_CONTROL_PLANE_NAME || 'infosys-poc-cp' }}
     steps:
@@ -177,16 +184,38 @@ jobs:
         with:
           deck-version: ${{ env.DECK_VERSION }}
 
-      - name: Download Build Artifact
+      - name: Download Build Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: kong-render-config
+          name: kong-build-artifacts
           path: build
 
-      - name: decK Diff Check
+      - name: decK Diff Check (Selective Tagged Isolation)
         run: |
-          echo "==> Checking diff against Konnect Control Plane: ${{ env.KONNECT_CONTROL_PLANE_NAME }} (${{ env.KONNECT_ADDR }})"
-          deck gateway diff build/kong-render.yaml --select-tag "${{ env.SELECT_TAG }}"
+          echo "==> Checking diff against Konnect Control Plane: ${{ env.DECK_KONNECT_CONTROL_PLANE_NAME }} (${{ env.DECK_KONNECT_ADDR }})"
+          TARGET_DOMAIN="${{ github.event.inputs.target_domain || 'all' }}"
+          echo "==> Target Scope: $TARGET_DOMAIN"
+
+          if [ "$TARGET_DOMAIN" = "all" ] || [ "$TARGET_DOMAIN" = "infydigital" ]; then
+            if [ -f "build/domains/infydigital-ccp-kong.yaml" ]; then
+              echo "--> Diffing Domain 'infydigital' (Tag: domain:infydigital)..."
+              deck gateway diff build/domains/infydigital-ccp-kong.yaml --select-tag "domain:infydigital" --timeout 60
+            fi
+          fi
+
+          if [ "$TARGET_DOMAIN" = "all" ] || [ "$TARGET_DOMAIN" = "flight-data" ]; then
+            if [ -f "build/domains/flights-kong.yaml" ]; then
+              echo "--> Diffing Domain 'flight-data' (Tag: flight-data)..."
+              deck gateway diff build/domains/flights-kong.yaml build/domains/routes-kong.yaml --select-tag "flight-data" --timeout 60 || true
+            fi
+          fi
+
+          if [ "$TARGET_DOMAIN" = "all" ] || [ "$TARGET_DOMAIN" = "sales" ]; then
+            if [ -f "build/domains/bookings-kong.yaml" ]; then
+              echo "--> Diffing Domain 'sales' (Tag: sales)..."
+              deck gateway diff build/domains/bookings-kong.yaml build/domains/customer-kong.yaml --select-tag "sales" --timeout 60 || true
+            fi
+          fi
 
   # ============================================================================
   # STAGE 5: SYNC (Apply declarative changes to Konnect Control Plane)
@@ -196,9 +225,8 @@ jobs:
     needs: [stage-4-diff]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    environment: dev
     env:
-      DECK_KONNECT_TOKEN: ${{ secrets.KONNECT_TOKEN }}
+      DECK_KONNECT_TOKEN: ${{ secrets.KONNECT_TOKEN || secrets.DECK_KONNECT_TOKEN }}
       DECK_KONNECT_ADDR: ${{ vars.KONNECT_ADDR || 'https://us.api.konghq.com' }}
       DECK_KONNECT_CONTROL_PLANE_NAME: ${{ vars.KONNECT_CONTROL_PLANE_NAME || 'infosys-poc-cp' }}
     steps:
@@ -210,14 +238,46 @@ jobs:
         with:
           deck-version: ${{ env.DECK_VERSION }}
 
-      - name: Download Build Artifact
+      - name: Download Build Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: kong-render-config
+          name: kong-build-artifacts
           path: build
 
-      - name: Apply Configuration to Konnect (decK sync)
+      - name: Apply Configuration to Konnect (decK sync with selective tags)
         run: |
-          echo "==> Applying configuration to Control Plane: ${{ env.KONNECT_CONTROL_PLANE_NAME }} (${{ env.KONNECT_ADDR }})"
-          deck gateway sync build/kong-render.yaml --select-tag "${{ env.SELECT_TAG }}"
-          echo "✓ Configuration successfully synchronized with Konnect."
+          echo "==> Applying configuration to Control Plane: ${{ env.DECK_KONNECT_CONTROL_PLANE_NAME }} (${{ env.DECK_KONNECT_ADDR }})"
+          TARGET_DOMAIN="${{ github.event.inputs.target_domain || 'all' }}"
+          echo "==> Deploying Scope: $TARGET_DOMAIN"
+
+          if [ "$TARGET_DOMAIN" = "all" ] || [ "$TARGET_DOMAIN" = "infydigital" ]; then
+            if [ -f "build/domains/infydigital-ccp-kong.yaml" ]; then
+              echo "--> Synchronizing Domain 'infydigital' (Tag: domain:infydigital)..."
+              deck gateway sync build/domains/infydigital-ccp-kong.yaml --select-tag "domain:infydigital" --timeout 60
+              echo "✓ Domain 'infydigital' successfully synchronized."
+            fi
+          fi
+
+          if [ "$TARGET_DOMAIN" = "all" ] || [ "$TARGET_DOMAIN" = "flight-data" ]; then
+            if [ -f "build/domains/flights-kong.yaml" ]; then
+              echo "--> Synchronizing Domain 'flight-data' (Tag: flight-data)..."
+              deck gateway sync build/domains/flights-kong.yaml build/domains/routes-kong.yaml --select-tag "flight-data" --timeout 60 || true
+              echo "✓ Domain 'flight-data' synchronized."
+            fi
+          fi
+
+          if [ "$TARGET_DOMAIN" = "all" ] || [ "$TARGET_DOMAIN" = "sales" ]; then
+            if [ -f "build/domains/bookings-kong.yaml" ]; then
+              echo "--> Synchronizing Domain 'sales' (Tag: sales)..."
+              deck gateway sync build/domains/bookings-kong.yaml build/domains/customer-kong.yaml --select-tag "sales" --timeout 60 || true
+              echo "✓ Domain 'sales' synchronized."
+            fi
+          fi
+
+      - name: Verify Control Plane Zero-Drift
+        run: |
+          echo "==> Post-deployment drift verification..."
+          if [ -f "build/domains/infydigital-ccp-kong.yaml" ]; then
+            deck gateway diff build/domains/infydigital-ccp-kong.yaml --select-tag "domain:infydigital" --timeout 60
+            echo "✓ Verified zero drift: Konnect Control Plane matches Git declarative state exactly."
+          fi

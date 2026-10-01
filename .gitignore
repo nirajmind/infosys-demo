@@ -11,3 +11,5 @@ tls*/
 *.log
 temp/
 build/
+certs/
+scratch/

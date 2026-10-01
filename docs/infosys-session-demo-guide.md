@@ -100,3 +100,41 @@ deck gateway sync demo-restructured/build/infydigital-ccp-kong.yaml `
 - `infosys-digital-ccp-services-api` is live.
 - Tags: `domain:infydigital`, `api:ccp-services`.
 - Zero blast radius across the rest of the enterprise.
+
+### Step 5: Startup the Local Data Plane (DP) Connected to Konnect
+Launch the local Docker Data Plane container mapped to the dedicated Control Plane:
+```powershell
+.\scripts\start-dp.ps1
+```
+*(Or on Linux/macOS: `./scripts/start-dp.sh`)*
+
+**What this proves:**
+- Connects to Konnect CP (`0646a7d680.us.cp.konghq.com:443`) via mutual TLS (mTLS).
+- Allocates free proxy ports:
+  - HTTP Proxy: `http://localhost:8010`
+  - HTTPS Proxy: `https://localhost:8453`
+  - Status API: `http://localhost:8101/status`
+- Automatically injects the required Nginx shared dictionary (`kong_rate_limiting_throttling 10m`).
+- Demonstrates immediate zero-downtime configuration delivery to the gateway engine (`configuration_hash: ca189072d2936c97ca189072d2936c97`).
+
+### Step 6: Execute the Automated End-to-End Test Suite
+Run the automated test script containing end-to-end curl validations:
+```powershell
+.\scripts\test-e2e.ps1
+```
+*(Or on Linux/macOS: `./scripts/test-e2e.sh`)*
+
+**What this executes and verifies:**
+1. **DP Health & CP Sync:** Confirms non-zero config hash and valid CP timestamp via `/status`.
+2. **Protocol Security Enforcement:** Confirms plain HTTP on port `8010` is rejected with `HTTP 426 Please use HTTPS protocol`.
+3. **Host Isolation (Negative Test):** Confirms requests with unauthorized Host headers return `HTTP 404 Not Found`, proving cross-tenant security.
+4. **HTTPS Route Matching:** Confirms `https://127.0.0.1:8453/infydigital/CCPServices/health` with `Host: itgatewaytst.infosysapps.com` is decrypted and handled by Kong Gateway.
+5. **Rate Limiting Advanced Policy:** Confirms rate limit quota headers (`RateLimit-Limit: 50`, `RateLimit-Remaining: 48`) decrement dynamically on each request.
+
+### Step 7: The Fully Automated GitHub Actions APIOps Pipeline
+Point Muthu and Veda to [`.github/workflows/kong-konnect-apiops.yml`](file:///c:/Users/nadhi/source-repos/Infosys-Demo/.github/workflows/kong-konnect-apiops.yml):
+- **Stage 1 (Validate):** Offline schema validation of all OpenAPI specs via `openapi2kong`.
+- **Stage 2 (Lint):** Spectral governance enforcing corporate API guidelines.
+- **Stage 3 (Build):** Assembles domain-specific declarative configs with isolated tags (`domain:infydigital`).
+- **Stage 4 (Diff):** Selective tagged diffing against `infosys-poc-cp` without touching other domains.
+- **Stage 5 (Sync):** Idempotent selective tagged deployment + post-sync zero-drift verification.
