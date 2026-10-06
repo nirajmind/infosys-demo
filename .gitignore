@@ -13,3 +13,5 @@ temp/
 build/
 certs/
 scratch/
+dist/
+*.zip

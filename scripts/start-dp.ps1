@@ -69,9 +69,11 @@ if ($LASTEXITCODE -eq 0) {
         Write-Host "  Configuration Hash: $($status.configuration_hash)" -ForegroundColor Green
         Write-Host "  CP Sync Time:       $([DateTimeOffset]::FromUnixTimeSeconds($status.sync_v1_last_time).LocalDateTime)" -ForegroundColor Green
         Write-Host "=========================================" -ForegroundColor Green
-    } catch {
+    }
+    catch {
         Write-Warning "DP started but Status API not yet ready. Check 'docker logs $CONTAINER_NAME'."
     }
-} else {
+}
+else {
     Write-Error "Failed to launch $CONTAINER_NAME container."
 }
